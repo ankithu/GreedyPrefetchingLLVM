@@ -1,1 +1,1 @@
-add_llvm_pass_plugin(GreedyPass greedyPrefetching.cpp)
+add_llvm_pass_plugin(GreedyPrefetch greedyPrefetching.cpp)
