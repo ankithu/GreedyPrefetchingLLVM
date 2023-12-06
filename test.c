@@ -1,8 +1,13 @@
 #include <stdio.h>
 
-int foo(int z){
-    printf("%d", z);
-    return 1;
+struct TreeNode {
+  int val;
+  struct TreeNode* l;
+  struct TreeNode* r;
+};
+
+int foo(struct TreeNode* tree){
+    return foo(tree->l);
 }
 
 int bar(int y){
@@ -15,8 +20,8 @@ int main()
 
   int in[1000]; 
   int i,j;
-
-  foo(24);
+  struct TreeNode n;
+  foo(&n);
   for (i = 0; i < 1000; i++)
   {
     in[i] = 0;
