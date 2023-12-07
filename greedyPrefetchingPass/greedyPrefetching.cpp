@@ -132,12 +132,13 @@ struct GreedyPrefetchPass : public PassInfoMixin<GreedyPrefetchPass> {
       for (auto& prefetchChain: prefetchChains){
         errs() << "    PREFETCH CHAIN: " << "\n";
         for (auto* value : prefetchChain){
-          errs() << "        VAL: " << *value << "\n";
+          if (auto* instr = dyn_cast<Instruction>(value)){
+            BasicBlock* bb = instr->getParent();
+            errs() << "        VAL: " << *value << " BB: " << bb << "\n";
+          }
         }
       }
     }
-
-
     
     return PreservedAnalyses::all();
   }
