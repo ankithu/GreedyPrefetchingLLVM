@@ -6,21 +6,19 @@ struct TreeNode {
   struct TreeNode* r;
 };
 
-int foo(struct TreeNode* tree){
+void preorder(struct TreeNode* tree){
     if (!tree){
-      return 0;
+      return;
     }
-    // return foo(tree->l);
-    int x = foo(tree->l) + foo(tree->r);
-    return x + tree->val;
+    printf("%d", tree->val);
+    preorder(tree->l);
+    preorder(tree->r);
 }
 
 
 int main()
 {
   struct TreeNode n;
-  foo(&n);
-
-  
-  return 1;
+  preorder(&n);
+  return 0;
 }
