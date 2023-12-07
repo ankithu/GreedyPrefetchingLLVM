@@ -63,10 +63,8 @@ struct GreedyPrefetchPass : public PassInfoMixin<GreedyPrefetchPass> {
         return valueChain;
       }
     }
-    
     return std::nullopt;
   }
-  
 
   /****
    * Returns a vector of call instructions within a given function that are recursive
@@ -87,14 +85,17 @@ struct GreedyPrefetchPass : public PassInfoMixin<GreedyPrefetchPass> {
     return res;
   }
 
-  /***
-   * Returns a vector of vectors representing each possible chain of instructions
-   * that leads from a function argument to a struct pointer that is passed into a
-   * recursive call 
-  */
-  std::vector<std::vector<Value*>> getArgumentToRecursiveCallChains(Function &F){
-    std::vector<std::vector<Value*>> output;
 
+
+  /***
+   * Returns a map from call instruction to vector of vectors 
+   * For a given recursive call we have a vector of Value chains (vector of Value*)
+   * representing each chain of instructions that leads from a function argument 
+   * to a struct pointer that is passed into arecursive call 
+  */
+  std::unordered_map<CallInst*, std::vector<std::vector<Value*>>> getArgumentToRecursiveCallChains(Function &F){
+    std::unordered_map<CallInst*, std::vector<std::vector<Value*>>> output;
+    auto arglist = F.args();
     std::vector<CallInst*> recursiveCalls = getRecursiveCalls(F);
 
     //the function isn't recursive so its not a candidate for this optimization.
@@ -102,7 +103,6 @@ struct GreedyPrefetchPass : public PassInfoMixin<GreedyPrefetchPass> {
       return output;
     }
 
-    auto arglist = F.args();
     for (auto arg = arglist.begin(); arg != arglist.end(); ++arg){
       if (auto* pt = dyn_cast<PointerType>(arg->getType())){
         llvm::Type* inner = pt->getPointerElementType();
@@ -114,12 +114,7 @@ struct GreedyPrefetchPass : public PassInfoMixin<GreedyPrefetchPass> {
           for (auto* recursiveCall : recursiveCalls){
             auto res = getInstructionChainFromArgToCall(recursiveCall, arg, arg);
             if (res){
-              output.push_back(*res);
-              errs() << "Prefetch candidate identified! \n original arugment: " << *arg << " \n";
-              for (auto* val : *res){
-                errs() << "value: " << *val << "\n";
-              }
-              errs() << "------ \n";
+              output[recursiveCall].push_back(*res);
             }
           }
         }
@@ -129,8 +124,20 @@ struct GreedyPrefetchPass : public PassInfoMixin<GreedyPrefetchPass> {
   }
 
   PreservedAnalyses run(Function &F, FunctionAnalysisManager &FAM) {
-    std::vector<std::vector<Value*>> prefetchChains = getArgumentToRecursiveCallChains(F);
-    
+
+    auto callsToPrefetchChains = getArgumentToRecursiveCallChains(F);
+
+    for (auto& [callInst, prefetchChains] : callsToPrefetchChains){
+      errs() << "CALL: " << *callInst << "\n";
+      for (auto& prefetchChain: prefetchChains){
+        errs() << "    PREFETCH CHAIN: " << "\n";
+        for (auto* value : prefetchChain){
+          errs() << "        VAL: " << *value << "\n";
+        }
+      }
+    }
+
+
     
     return PreservedAnalyses::all();
   }
