@@ -9,7 +9,7 @@ PATH2LIB="./build/greedyPrefetchingPass/GreedyPrefetch.so"
 PASS=greedy-prefetch
 
 # Clean out any last profiler/pass/bytecode/output/ll files
-rm -f default.profraw *_prof *_greedy *.bc *.profdata *_output *.ll
+rm -f default.profraw *_prof *_greedy *.bc *.profdata *_output *.ll *.exe
 
 ## Convert to bytecode
 clang -emit-llvm -c tests/$1.c -Xclang -disable-O0-optnone -o $1.bc
