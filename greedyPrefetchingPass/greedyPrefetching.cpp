@@ -153,8 +153,8 @@ struct GreedyPrefetchPass : public PassInfoMixin<GreedyPrefetchPass> {
   /***
    * Returns map from call to vector of Arguments that it relies on
   */
-  std::unordered_map<CallInst*, std::vector<Value*>> getCallsToRequiredArguments(Function &F){
-    std::unordered_map<CallInst*, std::vector<Value*>> output;
+  std::unordered_map<Value*, std::vector<CallInst*>> getArgumentsToCallsThatNeedIt(Function &F){
+    std::unordered_map<Value*, std::vector<CallInst*>> output;
     auto arglist = F.args();
     std::vector<CallInst*> recursiveCalls = getRecursiveCalls(F);
 
@@ -166,7 +166,7 @@ struct GreedyPrefetchPass : public PassInfoMixin<GreedyPrefetchPass> {
     for (auto arg = arglist.begin(); arg != arglist.end(); ++arg){
       for (auto* recursiveCall : recursiveCalls){
         if (isChainFromArgToCall(recursiveCall, arg, arg)) {
-          output[recursiveCall].push_back(arg);
+          output[arg].push_back(recursiveCall);
         }
       }
     }
@@ -196,18 +196,39 @@ struct GreedyPrefetchPass : public PassInfoMixin<GreedyPrefetchPass> {
     }
   }
 
-  PreservedAnalyses run(Function &F, FunctionAnalysisManager &FAM) {
-    std::unordered_map<CallInst*, std::vector<Value*>> callsToRequiredArgs = getCallsToRequiredArguments(F);
-    std::unordered_map<Value*, std::vector<size_t>> RDSTypesToOffsets = getRecursiveMemberOffsets(F);
-    
+  std::unordered_map<BasicBlock*, size_t> getStaticOrdering(Function &F){
+    //gets a static ordering of the basic blocks to give an approximate sequence
+    size_t i = 0;
+    std::unordered_map<BasicBlock*, size_t> output;
+    for (auto& bb : F){
+      output[&bb] = i;
+      ++i;
+    }
+    return output;
+  }
 
-    for (auto& [callInst, requiredArgs] : callsToRequiredArgs) {
-      for (auto* arg : requiredArgs) {
-        if (RDSTypesToOffsets.find(arg) != RDSTypesToOffsets.end()) {
-          BasicBlock* bbToInsertPrefetches = getIDom(F, callInst);
-          std::vector<Instruction*> prefetches = getPrefetchInstructions(arg, RDSTypesToOffsets[arg], F);
-          insertPrefetchesAtStartOfBB(bbToInsertPrefetches, prefetches);
+  PreservedAnalyses run(Function &F, FunctionAnalysisManager &FAM) {
+    std::unordered_map<Value*, std::vector<CallInst*>> argsToCalls = getArgumentsToCallsThatNeedIt(F);
+    std::unordered_map<Value*, std::vector<size_t>> RDSTypesToOffsets = getRecursiveMemberOffsets(F);
+    std::unordered_map<BasicBlock*, size_t> order = getStaticOrdering(F);
+
+    for (auto& [arg, calls] : argsToCalls) {
+      if (RDSTypesToOffsets.find(arg) == RDSTypesToOffsets.end()){
+        continue;
+      }
+      std::vector<Instruction*> prefetches = getPrefetchInstructions(arg, RDSTypesToOffsets[arg], F);
+      BasicBlock* insertionPoint = nullptr;
+      for (auto* call : calls) {
+        BasicBlock* candidateInsertionPoint = getIDom(F, call);
+        if (!insertionPoint || order[candidateInsertionPoint] < order[insertionPoint]){
+          insertionPoint = candidateInsertionPoint;
         }
+      }
+      if (insertionPoint) {
+        insertPrefetchesAtStartOfBB(insertionPoint, prefetches);
+      }
+      else{
+        errs() << "no insertion point calculated. This is probably wrong! \n";
       }
     }
 
