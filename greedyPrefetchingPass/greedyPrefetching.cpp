@@ -5,6 +5,9 @@
 #include "llvm/Support/raw_ostream.h"
 #include "llvm/Analysis/DependenceAnalysis.h"
 #include "llvm/IR/DataLayout.h"
+#include <llvm/IR/IRBuilder.h>
+#include <llvm/IR/Intrinsics.h>
+#include <llvm/IR/Instructions.h>
 
 #include <optional>
 #include  <iostream>
@@ -54,7 +57,7 @@ struct GreedyPrefetchPass : public PassInfoMixin<GreedyPrefetchPass> {
         errs() << "ruh roh \n"; 
         return false;
       }
-      if (getInstructionChainFromArgToCall(instr, arg, user)){
+      if (isChainFromArgToCall(instr, arg, user)){
         return true;
       }
     }
@@ -91,19 +94,60 @@ struct GreedyPrefetchPass : public PassInfoMixin<GreedyPrefetchPass> {
       *       if member type dyncasts to struct ptr
       *         add offset to result vector
     ***/
-    for (auto* a : F.args()) {
-      if (auto* ptr = dyn_cast<PointerType>(a->type) && auto*) {
-        // FIXME: 
-  e
-      }
-    }
+    // for (auto* a : F.args()) {
+    //   if (auto* ptr = dyn_cast<PointerType>(a->type) && auto*) {
+    //     // FIXME: 
+  
+    //   }
+    // }
+    return std::unordered_map<Value*, std::vector<size_t>>();
   }
 
   /***
   * Generates prefetch instructions for given RDS (greedily prefetch entire RDS)
   */
-  std::vector<Instruction*> getPrefetchInstructions(Value* arg, std::vector<size_t>& offsets) {
+  std::vector<Instruction*> getPrefetchInstructions(Value* arg, std::vector<size_t>& offsets, Function& F) {
+    /***
+     * Steps:
+     * 1. Load the argument (this is the address of arg now)
+     * For each offset:
+     *   - Compute address of struct element
+     *   - Prefetch addres
+     * Total instructions 1 + 2 * (num_offsets)
+    */
 
+    std::vector<Instruction*> prefetchInstructions;
+
+    LLVMContext &context = arg->getContext();
+    IRBuilder<> builder(context);
+
+    // Load the value of arg (the address of the struct)    
+    LoadInst* loadedArg = builder.CreateLoad(arg->getType()->getPointerElementType(), arg);
+    prefetchInstructions.push_back(loadedArg);
+
+    Function* prefetchFunc = Intrinsic::getDeclaration(F.getParent(), Intrinsic::prefetch);
+
+    for (size_t offset : offsets) {
+        // Compute address of struct element using byte offset
+        Value* offsetValue = ConstantInt::get(Type::getInt64Ty(context), offset);
+        Value* elementAddr = builder.CreateGEP(loadedArg->getType()->getPointerElementType(), loadedArg, offsetValue);
+
+        // Prefetch address
+        // 0 = read, 3 = high locality, 1 = data cache
+        std::vector<Value*> args = {
+            elementAddr,
+            builder.getInt32(0), // rw = 0 (read)
+            builder.getInt32(3), // locality
+            builder.getInt32(1)  // cache type (data cache)
+        };
+
+        CallInst* prefetchInst = builder.CreateCall(prefetchFunc, args);
+        prefetchInstructions.push_back(prefetchInst);
+    }
+
+    return prefetchInstructions;
+    
+  
   }
   
   /***
@@ -121,7 +165,7 @@ struct GreedyPrefetchPass : public PassInfoMixin<GreedyPrefetchPass> {
 
     for (auto arg = arglist.begin(); arg != arglist.end(); ++arg){
       for (auto* recursiveCall : recursiveCalls){
-        if (getInstructionChainFromArgToCall(recursiveCall, arg, arg)) {
+        if (isChainFromArgToCall(recursiveCall, arg, arg)) {
           output[recursiveCall].push_back(arg);
         }
       }
@@ -146,12 +190,9 @@ struct GreedyPrefetchPass : public PassInfoMixin<GreedyPrefetchPass> {
     return nullptr;
   }
 
-  void insertPrefetchesAtStartOfBB(BasicBlock* bb, std::vector<Value*> prefetches){
-    for (auto chain_itr = prefetches.begin(); chain_itr !=  prefetches.end(); ++chain_itr) {
-      if (auto* instToCopy = dyn_cast<Instruction>(*chain_itr)) {
-        Instruction* newInst = instToCopy->clone();
-        bb->getInstList().insert(bb->begin(), newInst);
-      }
+  void insertPrefetchesAtStartOfBB(BasicBlock* bb, std::vector<Instruction*> prefetches){
+    for (auto instr : prefetches) {
+      bb->getInstList().insert(bb->begin(), instr);
     }
   }
 
@@ -164,7 +205,7 @@ struct GreedyPrefetchPass : public PassInfoMixin<GreedyPrefetchPass> {
       for (auto* arg : requiredArgs) {
         if (RDSTypesToOffsets.find(arg) != RDSTypesToOffsets.end()) {
           BasicBlock* bbToInsertPrefetches = getIDom(F, callInst);
-          std::vector<Instruction*> prefetches = getPrefetchInstructions(arg, RDSTypesToOffsets[arg]);
+          std::vector<Instruction*> prefetches = getPrefetchInstructions(arg, RDSTypesToOffsets[arg], F);
           insertPrefetchesAtStartOfBB(bbToInsertPrefetches, prefetches);
         }
       }
