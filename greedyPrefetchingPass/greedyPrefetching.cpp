@@ -1,8 +1,11 @@
+#include "llvm/IR/Dominators.h"
 #include "llvm/IR/PassManager.h"
 #include "llvm/Passes/PassBuilder.h"
 #include "llvm/Passes/PassPlugin.h"
 #include "llvm/Support/raw_ostream.h"
 #include "llvm/Analysis/DependenceAnalysis.h"
+#include "llvm/IR/DataLayout.h"
+
 #include <optional>
 #include  <iostream>
 
@@ -14,27 +17,25 @@ namespace {
 struct GreedyPrefetchPass : public PassInfoMixin<GreedyPrefetchPass> {
   
   /**
-   * if a recursive call derives from an argument, this will return a vector of all the instructions
-   * required to calculate the pointer to the argument. Starting with the argument and 
-   * ending with address passed into the call instruction.
+   * if a recursive call derives from an argument, this will return true
   */
-  std::optional<std::vector<Value*>> getInstructionChainFromArgToCall(CallInst* instr, Argument* arg, Value* recurseVal){
+  bool isChainFromArgToCall(CallInst* instr, Argument* arg, Value* recurseVal){
     //if the value is a store instruction we want to check 
     //if we use the address later
     if (auto* storeInst = dyn_cast<StoreInst>(recurseVal)) {
-      if (storeInst->getValueOperand() == arg || storeInst->getValueOperand() == recurseVal){
+      if (storeInst->getValueOperand() == arg || storeInst->getValueOperand() == recurseVal) {
         recurseVal = storeInst->getPointerOperand();
       }
     }
 
     //don't cross function boundaries (maybe consider how this should work properly later)
-    if (auto* callInst = dyn_cast<CallInst>(recurseVal)){
+    if (auto* callInst = dyn_cast<CallInst>(recurseVal)) {
       //errs() << "call inst, skipping. \n";
-      return std::nullopt;
+      return false;
     }
-    if (auto* retInst = dyn_cast<ReturnInst>(recurseVal)){
+    if (auto* retInst = dyn_cast<ReturnInst>(recurseVal)) {
       //errs() << "ret inst, skipping. \n";
-      return std::nullopt;
+      return false;
     }
 
     //errs() << "instr: " << *instr << ", val: " << *val << "\n";
@@ -42,28 +43,22 @@ struct GreedyPrefetchPass : public PassInfoMixin<GreedyPrefetchPass> {
       //errs() << "   user: " <<  *user << "\n";
       if (user == instr){
         if (auto* inst = dyn_cast<Instruction>(user)){
-          for (unsigned i = 0; i < inst->getNumOperands(); ++i){
+          for (unsigned i = 0; i < inst->getNumOperands(); ++i) {
             Value *operand = inst->getOperand(i);
             if (operand == recurseVal){
-              std::vector<Value*> ret = {operand};
-              return ret;
+              return true;
             }
           }
         }
         //should never reach here
         errs() << "ruh roh \n"; 
-        return std::nullopt;
+        return false;
       }
-      auto res = getInstructionChainFromArgToCall(instr, arg, user);
-      if (res){
-        std::vector<Value*>& valueChain = *res;
-        //I realize that this isn't really that efficient but these chains should
-        //not be very long and I don't really care...
-        valueChain.insert(valueChain.begin(), recurseVal);
-        return valueChain;
+      if (getInstructionChainFromArgToCall(instr, arg, user)){
+        return true;
       }
     }
-    return std::nullopt;
+    return false;
   }
 
   /****
@@ -85,16 +80,37 @@ struct GreedyPrefetchPass : public PassInfoMixin<GreedyPrefetchPass> {
     return res;
   }
 
-
+  /***
+    * Returns a map from argument of function args to offsets of record pointer members
+  ***/
+  std::unordered_map<Value*, std::vector<size_t>> getRecursiveMemberOffsets(Function &F) {
+    /***
+      * For each function arg typ
+      *   if type dyncasts to struct ptr
+      *     For each member type of arg
+      *       if member type dyncasts to struct ptr
+      *         add offset to result vector
+    ***/
+    for (auto* a : F.args()) {
+      if (auto* ptr = dyn_cast<PointerType>(a->type) && auto*) {
+        // FIXME: 
+  e
+      }
+    }
+  }
 
   /***
-   * Returns a map from call instruction to vector of vectors 
-   * For a given recursive call we have a vector of Value chains (vector of Value*)
-   * representing each chain of instructions that leads from a function argument 
-   * to a struct pointer that is passed into arecursive call 
+  * Generates prefetch instructions for given RDS (greedily prefetch entire RDS)
   */
-  std::unordered_map<CallInst*, std::vector<std::vector<Value*>>> getArgumentToRecursiveCallChains(Function &F){
-    std::unordered_map<CallInst*, std::vector<std::vector<Value*>>> output;
+  std::vector<Instruction*> getPrefetchInstructions(Value* arg, std::vector<size_t>& offsets) {
+
+  }
+  
+  /***
+   * Returns map from call to vector of Arguments that it relies on
+  */
+  std::unordered_map<CallInst*, std::vector<Value*>> getCallsToRequiredArguments(Function &F){
+    std::unordered_map<CallInst*, std::vector<Value*>> output;
     auto arglist = F.args();
     std::vector<CallInst*> recursiveCalls = getRecursiveCalls(F);
 
@@ -104,39 +120,59 @@ struct GreedyPrefetchPass : public PassInfoMixin<GreedyPrefetchPass> {
     }
 
     for (auto arg = arglist.begin(); arg != arglist.end(); ++arg){
-      if (auto* pt = dyn_cast<PointerType>(arg->getType())){
-        llvm::Type* inner = pt->getPointerElementType();
-        //triggers if the argument is a pointer to a struct
-        if (inner->isStructTy()){
-          llvm::StructType* st = (llvm::StructType*) inner;
-          //for every struct pointer argument we check every recursive call in the function to see
-          //if there is a usage chain 
-          for (auto* recursiveCall : recursiveCalls){
-            auto res = getInstructionChainFromArgToCall(recursiveCall, arg, arg);
-            if (res){
-              output[recursiveCall].push_back(*res);
-            }
-          }
+      for (auto* recursiveCall : recursiveCalls){
+        if (getInstructionChainFromArgToCall(recursiveCall, arg, arg)) {
+          output[recursiveCall].push_back(arg);
         }
       }
     }
     return output;
   }
 
-  PreservedAnalyses run(Function &F, FunctionAnalysisManager &FAM) {
-
-    auto callsToPrefetchChains = getArgumentToRecursiveCallChains(F);
-
-    for (auto& [callInst, prefetchChains] : callsToPrefetchChains){
-      errs() << "CALL: " << *callInst << "\n";
-      for (auto& prefetchChain: prefetchChains){
-        errs() << "    PREFETCH CHAIN: " << "\n";
-        for (auto* value : prefetchChain){
-          if (auto* instr = dyn_cast<Instruction>(value)){
-            BasicBlock* bb = instr->getParent();
-            errs() << "        VAL: " << *value << " BB: " << bb << "\n";
+  BasicBlock* getIDom(Function& F, Value* target){
+    // brute force iteration over all instructions to find idom of what we want to prefetch
+    llvm::DominatorTree DT;
+    
+    DT.recalculate(F);
+    if (auto* targetInstr = dyn_cast<Instruction>(target)){
+      for (auto& bb : F) {
+        for (auto& instr: bb) {
+          if (DT.dominates(&instr, targetInstr)) {
+            return &bb;
           }
         }
+      }
+    }
+    return nullptr;
+  }
+
+  void insertPrefetchesAtStartOfBB(BasicBlock* bb, std::vector<Value*> prefetches){
+    for (auto chain_itr = prefetches.begin(); chain_itr !=  prefetches.end(); ++chain_itr) {
+      if (auto* instToCopy = dyn_cast<Instruction>(*chain_itr)) {
+        Instruction* newInst = instToCopy->clone();
+        bb->getInstList().insert(bb->begin(), newInst);
+      }
+    }
+  }
+
+  PreservedAnalyses run(Function &F, FunctionAnalysisManager &FAM) {
+    std::unordered_map<CallInst*, std::vector<Value*>> callsToRequiredArgs = getCallsToRequiredArguments(F);
+    std::unordered_map<Value*, std::vector<size_t>> RDSTypesToOffsets = getRecursiveMemberOffsets(F);
+    
+
+    for (auto& [callInst, requiredArgs] : callsToRequiredArgs) {
+      for (auto* arg : requiredArgs) {
+        if (RDSTypesToOffsets.find(arg) != RDSTypesToOffsets.end()) {
+          BasicBlock* bbToInsertPrefetches = getIDom(F, callInst);
+          std::vector<Instruction*> prefetches = getPrefetchInstructions(arg, RDSTypesToOffsets[arg]);
+          insertPrefetchesAtStartOfBB(bbToInsertPrefetches, prefetches);
+        }
+      }
+    }
+
+    for (auto& bb : F){
+      for (auto& i : bb){
+        errs() << i << "\n";
       }
     }
     
@@ -152,7 +188,7 @@ extern "C" ::llvm::PassPluginLibraryInfo LLVM_ATTRIBUTE_WEAK llvmGetPassPluginIn
       PB.registerPipelineParsingCallback(
         [](StringRef Name, FunctionPassManager &FPM,
         ArrayRef<PassBuilder::PipelineElement>) {
-          if(Name == "greedy-prefetch"){
+          if (Name == "greedy-prefetch") {
             FPM.addPass(GreedyPrefetchPass());
             return true;
           }
@@ -162,4 +198,3 @@ extern "C" ::llvm::PassPluginLibraryInfo LLVM_ATTRIBUTE_WEAK llvmGetPassPluginIn
     }
   };
 }
-
