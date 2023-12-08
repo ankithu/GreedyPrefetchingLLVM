@@ -9,8 +9,10 @@
 #include <llvm/IR/Intrinsics.h>
 #include <llvm/IR/Instructions.h>
 
+#include <string>
 #include <optional>
-#include  <iostream>
+#include <iostream>
+#include <vector>
 
 using namespace llvm;
 
@@ -86,6 +88,7 @@ struct GreedyPrefetchPass : public PassInfoMixin<GreedyPrefetchPass> {
   /***
     * Returns a map from argument of function args to offsets of record pointer members
   ***/
+ // TODO: check that structs are not opaque before peering into them
   std::unordered_map<Value*, std::vector<size_t>> getRecursiveMemberOffsets(Function &F) {
     /***
       * For each function arg typ
@@ -94,13 +97,35 @@ struct GreedyPrefetchPass : public PassInfoMixin<GreedyPrefetchPass> {
       *       if member type dyncasts to struct ptr
       *         add offset to result vector
     ***/
-    // for (auto* a : F.args()) {
-    //   if (auto* ptr = dyn_cast<PointerType>(a->type) && auto*) {
-    //     // FIXME: 
-  
-    //   }
-    // }
-    return std::unordered_map<Value*, std::vector<size_t>>();
+    Module* module = F.getParent();
+    const DataLayout& DL = module->getDataLayout();
+    std::unordered_map<Value*, std::vector<size_t>> offsets;
+
+    auto arglist = F.args();
+
+    for (auto* a = arglist.begin(); a != arglist.end(); ++a){
+      if (auto* ptr = dyn_cast<PointerType>(a->getType())) {
+        if (auto* innerType = dyn_cast<StructType>(ptr->getElementType())) {
+          for (size_t i = 0; i < innerType->getNumElements(); ++i) {
+            auto* fieldType = innerType->getTypeAtIndex(i);
+
+            if (auto* fieldPtr = dyn_cast<PointerType>(fieldType)) {
+              if (auto* fieldInnerType = dyn_cast<StructType>(fieldPtr->getElementType())) {
+                uint64_t offset = DL.getStructLayout(innerType)->getElementOffset(i);
+                offsets[a].push_back(offset);
+
+                std::string type_str;
+                llvm::raw_string_ostream rso(type_str);
+                fieldInnerType->print(rso);
+                llvm::errs() << "Type Info: " << rso.str() << " " << offset << " " << "\n";
+              }
+            }
+
+          }
+        }
+      }
+    }
+    return offsets;
   }
 
   /***
@@ -237,7 +262,8 @@ struct GreedyPrefetchPass : public PassInfoMixin<GreedyPrefetchPass> {
         errs() << i << "\n";
       }
     }
-    
+
+
     return PreservedAnalyses::all();
   }
 };
