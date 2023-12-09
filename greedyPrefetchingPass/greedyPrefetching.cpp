@@ -131,7 +131,7 @@ struct GreedyPrefetchPass : public PassInfoMixin<GreedyPrefetchPass> {
   /***
   * Generates prefetch instructions for given RDS (greedily prefetch entire RDS)
   */
-  std::vector<Instruction*> getPrefetchInstructions(Value* arg, std::vector<size_t>& offsets, Function& F) {
+  void genAndInsertPrefetchInstructions(Value* arg, std::vector<size_t>& offsets, BasicBlock* insertionBB, Function& F) {
     /***
      * Steps:
      * 1. Load the argument (this is the address of arg now)
@@ -140,37 +140,47 @@ struct GreedyPrefetchPass : public PassInfoMixin<GreedyPrefetchPass> {
      *   - Prefetch addres
      * Total instructions 1 + 2 * (num_offsets)
     */
+    LLVMContext& context = F.getContext();
 
     std::vector<Instruction*> prefetchInstructions;
 
-    LLVMContext &context = arg->getContext();
-    IRBuilder<> builder(context);
 
     // Load the value of arg (the address of the struct)    
-    LoadInst* loadedArg = builder.CreateLoad(arg->getType()->getPointerElementType(), arg);
+    auto eltT = arg->getType()->getPointerElementType();
+    errs() << *eltT << " a:" << *arg << "\n";
+    LoadInst* loadedArg = new LoadInst(eltT, arg, "", &*insertionBB->begin());
     prefetchInstructions.push_back(loadedArg);
-
+    errs() << F << " \n \n \n" << *F.getParent() << " \n \n";
     Function* prefetchFunc = Intrinsic::getDeclaration(F.getParent(), Intrinsic::prefetch);
 
     for (size_t offset : offsets) {
         // Compute address of struct element using byte offset
         Value* offsetValue = ConstantInt::get(Type::getInt64Ty(context), offset);
-        Value* elementAddr = builder.CreateGEP(loadedArg->getType()->getPointerElementType(), loadedArg, offsetValue);
+        // Create a new GEP instruction (dangling, not yet attached to a basic block)
+        Value* elementAddr = GetElementPtrInst::Create(
+                                  eltT, // The element type
+                                  loadedArg, // The base pointer
+                                  {offsetValue}, // The index list
+                                  "",
+                                  &*insertionBB->begin()
+                            );
+
+       // builder.CreateGEP(loadedArg->getType()->getPointerElementType(), loadedArg, offsetValue);
 
         // Prefetch address
         // 0 = read, 3 = high locality, 1 = data cache
         std::vector<Value*> args = {
             elementAddr,
-            builder.getInt32(0), // rw = 0 (read)
-            builder.getInt32(3), // locality
-            builder.getInt32(1)  // cache type (data cache)
+            ConstantInt::get(Type::getInt32Ty(context), 0), // rw = 0 (read)
+            ConstantInt::get(Type::getInt32Ty(context), 3), // locality
+            ConstantInt::get(Type::getInt32Ty(context), 1)  // cache type (data cache)
         };
 
-        CallInst* prefetchInst = builder.CreateCall(prefetchFunc, args);
-        prefetchInstructions.push_back(prefetchInst);
+        // Create a new CallInst (dangling, not yet attached to a basic block)
+        CallInst* prefetchInst = CallInst::Create(prefetchFunc->getFunctionType(), prefetchFunc, args, "", &*insertionBB->begin());
+
     }
 
-    return prefetchInstructions;
     
   
   }
@@ -215,11 +225,7 @@ struct GreedyPrefetchPass : public PassInfoMixin<GreedyPrefetchPass> {
     return nullptr;
   }
 
-  void insertPrefetchesAtStartOfBB(BasicBlock* bb, std::vector<Instruction*> prefetches){
-    for (auto instr : prefetches) {
-      bb->getInstList().insert(bb->begin(), instr);
-    }
-  }
+
 
   std::unordered_map<BasicBlock*, size_t> getStaticOrdering(Function &F){
     //gets a static ordering of the basic blocks to give an approximate sequence
@@ -241,7 +247,6 @@ struct GreedyPrefetchPass : public PassInfoMixin<GreedyPrefetchPass> {
       if (RDSTypesToOffsets.find(arg) == RDSTypesToOffsets.end()){
         continue;
       }
-      std::vector<Instruction*> prefetches = getPrefetchInstructions(arg, RDSTypesToOffsets[arg], F);
       BasicBlock* insertionPoint = nullptr;
       for (auto* call : calls) {
         BasicBlock* candidateInsertionPoint = getIDom(F, call);
@@ -250,7 +255,7 @@ struct GreedyPrefetchPass : public PassInfoMixin<GreedyPrefetchPass> {
         }
       }
       if (insertionPoint) {
-        insertPrefetchesAtStartOfBB(insertionPoint, prefetches);
+        genAndInsertPrefetchInstructions(arg, RDSTypesToOffsets[arg], insertionPoint, F);
       }
       else{
         errs() << "no insertion point calculated. This is probably wrong! \n";
