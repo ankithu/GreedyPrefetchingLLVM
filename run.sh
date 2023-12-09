@@ -21,11 +21,10 @@ clang ${1}.bc -o ${1}.exe
 # ./${1}.exe > correct_output TODO: UPDATE EXAMPLES FOR OUTPUT REASONS
 
 opt -load-pass-plugin="./build/greedyPrefetchingPass/GreedyPrefetch.so" -passes="greedy-prefetch" ${1}.bc -o ${1}_greedy.bc
-
 clang ${1}_greedy.bc -o ${1}_greedy.exe
 
 # get ll files for debugging
-llvm-dis ${1}.bc -o ${1}_greedy.ll
+llvm-dis ${1}.bc -o ${1}.ll
 llvm-dis ${1}_greedy.bc -o ${1}_greedy.ll
 
 # ./${1}_greedy > greedy_output TODO: UPDATE EXAMPLES FOR OUTPUT REASONS

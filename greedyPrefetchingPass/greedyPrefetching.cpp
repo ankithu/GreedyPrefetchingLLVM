@@ -1,4 +1,4 @@
-#include "llvm/IR/Dominators.h"
+#include "llvm/Analysis/PostDominators.h"
 #include "llvm/IR/PassManager.h"
 #include "llvm/Passes/PassBuilder.h"
 #include "llvm/Passes/PassPlugin.h"
@@ -8,11 +8,14 @@
 #include <llvm/IR/IRBuilder.h>
 #include <llvm/IR/Intrinsics.h>
 #include <llvm/IR/Instructions.h>
+#include "llvm/IR/CFG.h"
 
+#include <queue>
 #include <string>
 #include <optional>
 #include <iostream>
 #include <vector>
+#include <set>
 
 using namespace llvm;
 
@@ -128,6 +131,14 @@ struct GreedyPrefetchPass : public PassInfoMixin<GreedyPrefetchPass> {
     return offsets;
   }
 
+  size_t countInstructions(BasicBlock& bb){
+    size_t c = 0;
+    for (auto& ins : bb){
+      ++c;
+    }
+    return c;
+  }
+
   /***
   * Generates prefetch instructions for given RDS (greedily prefetch entire RDS)
   */
@@ -141,30 +152,25 @@ struct GreedyPrefetchPass : public PassInfoMixin<GreedyPrefetchPass> {
      * Total instructions 1 + 2 * (num_offsets)
     */
     LLVMContext& context = F.getContext();
+    IRBuilder<> builder(insertionBB, insertionBB->begin());
 
-    std::vector<Instruction*> prefetchInstructions;
 
-
-    // Load the value of arg (the address of the struct)    
     auto eltT = arg->getType()->getPointerElementType();
-    errs() << *eltT << " a:" << *arg << "\n";
-    LoadInst* loadedArg = new LoadInst(eltT, arg, "", &*insertionBB->begin());
-    prefetchInstructions.push_back(loadedArg);
-    errs() << F << " \n \n \n" << *F.getParent() << " \n \n";
-    Function* prefetchFunc = Intrinsic::getDeclaration(F.getParent(), Intrinsic::prefetch);
+    Function* prefetchFunc = Intrinsic::getDeclaration(F.getParent(), Intrinsic::prefetch, eltT);
 
+    size_t origBBSize = countInstructions(*insertionBB);
     for (size_t offset : offsets) {
         // Compute address of struct element using byte offset
-        Value* offsetValue = ConstantInt::get(Type::getInt64Ty(context), offset);
+        Value* offsetValue = ConstantInt::get(Type::getInt32Ty(context), offset);
         // Create a new GEP instruction (dangling, not yet attached to a basic block)
-        Value* elementAddr = GetElementPtrInst::Create(
+        Instruction* elementAddr = GetElementPtrInst::Create(
                                   eltT, // The element type
-                                  loadedArg, // The base pointer
+                                  arg, // The base pointer
                                   {offsetValue}, // The index list
                                   "",
-                                  &*insertionBB->begin()
+                                  insertionBB->getTerminator()
                             );
-
+        //Value* elementAddr = builder.CreateGEP(eltT, arg, {offsetValue}, "");
        // builder.CreateGEP(loadedArg->getType()->getPointerElementType(), loadedArg, offsetValue);
 
         // Prefetch address
@@ -177,12 +183,32 @@ struct GreedyPrefetchPass : public PassInfoMixin<GreedyPrefetchPass> {
         };
 
         // Create a new CallInst (dangling, not yet attached to a basic block)
-        CallInst* prefetchInst = CallInst::Create(prefetchFunc->getFunctionType(), prefetchFunc, args, "", &*insertionBB->begin());
-
+        CallInst* prefetchInst = CallInst::Create(prefetchFunc->getFunctionType(), prefetchFunc, args, "");
+        prefetchInst->insertBefore(insertionBB->getTerminator());
+        //Value* call = builder.CreateCall(prefetchFunc->getFunctionType(), prefetchFunc, args, "");
     }
+    errs() << origBBSize << " \n";
+    // for (size_t i = 0; i < offsets.size(); ++i){
+    //   // Get the terminator instruction
+    //   Instruction *terminator = insertionBB->getTerminator();
 
-    
-  
+    //   // Get the instruction before the terminator
+    //   Instruction *instrToMove = terminator->getPrevNode();
+
+    //   // Remove from its current position
+    //   instrToMove->removeFromParent();
+
+    //   // Insert at the beginning of the basic block
+    //   insertionBB->getInstList().insert(insertionBB->getFirstInsertionPt(), instrToMove);
+    // }
+    // for (size_t i = 0; i < origBBSize; ++i){
+    //   Instruction* firstInst = &*insertionBB->begin();
+    //   Instruction* terminatorInst = insertionBB->getTerminator();
+    //   errs() << "f:" << firstInst << " \n" << "l: " << terminatorInst << " \n";
+    //   if (firstInst != terminatorInst) {
+    //     firstInst->moveBefore(terminatorInst);
+    //   }
+    // }
   }
   
   /***
@@ -208,53 +234,56 @@ struct GreedyPrefetchPass : public PassInfoMixin<GreedyPrefetchPass> {
     return output;
   }
 
-  BasicBlock* getIDom(Function& F, Value* target){
-    // brute force iteration over all instructions to find idom of what we want to prefetch
-    llvm::DominatorTree DT;
+  BasicBlock* findFirstBlockThatNecessitatesExecutionOfOneOf(std::vector<CallInst*> targetInstructions, Function& F) {
+    PostDominatorTree PDT;
+    PDT.recalculate(F);
+
+    std::vector<BasicBlock*> targetBlocks;
+    for (auto* tIns : targetInstructions){
+      targetBlocks.push_back(tIns->getParent());
+    }
     
-    DT.recalculate(F);
-    if (auto* targetInstr = dyn_cast<Instruction>(target)){
-      for (auto& bb : F) {
-        for (auto& instr: bb) {
-          if (DT.dominates(&instr, targetInstr)) {
-            return &bb;
+    std::queue<BasicBlock*> blockQueue;
+    std::set<BasicBlock*> visited;
+
+    blockQueue.push(&F.getEntryBlock());
+    visited.insert(&F.getEntryBlock());
+
+    while (!blockQueue.empty()) {
+        BasicBlock *currentBlock = blockQueue.front();
+        blockQueue.pop();
+
+        for (auto* targetBlock : targetBlocks){
+
+          if (currentBlock == targetBlock || PDT.dominates(targetBlock, currentBlock)){
+            return currentBlock;
           }
         }
-      }
+        
+
+        for (BasicBlock *successor : successors(currentBlock)) {
+          if (visited.find(successor) == visited.end()) {
+            blockQueue.push(successor);
+            visited.insert(successor);
+          }
+        }
     }
+
     return nullptr;
-  }
+}
 
-
-
-  std::unordered_map<BasicBlock*, size_t> getStaticOrdering(Function &F){
-    //gets a static ordering of the basic blocks to give an approximate sequence
-    size_t i = 0;
-    std::unordered_map<BasicBlock*, size_t> output;
-    for (auto& bb : F){
-      output[&bb] = i;
-      ++i;
-    }
-    return output;
-  }
 
   PreservedAnalyses run(Function &F, FunctionAnalysisManager &FAM) {
     std::unordered_map<Value*, std::vector<CallInst*>> argsToCalls = getArgumentsToCallsThatNeedIt(F);
     std::unordered_map<Value*, std::vector<size_t>> RDSTypesToOffsets = getRecursiveMemberOffsets(F);
-    std::unordered_map<BasicBlock*, size_t> order = getStaticOrdering(F);
 
     for (auto& [arg, calls] : argsToCalls) {
       if (RDSTypesToOffsets.find(arg) == RDSTypesToOffsets.end()){
         continue;
       }
-      BasicBlock* insertionPoint = nullptr;
-      for (auto* call : calls) {
-        BasicBlock* candidateInsertionPoint = getIDom(F, call);
-        if (!insertionPoint || order[candidateInsertionPoint] < order[insertionPoint]){
-          insertionPoint = candidateInsertionPoint;
-        }
-      }
+      BasicBlock* insertionPoint = findFirstBlockThatNecessitatesExecutionOfOneOf(calls, F);
       if (insertionPoint) {
+        errs() << "insertionPoint is: " << *insertionPoint->begin() << "\n";
         genAndInsertPrefetchInstructions(arg, RDSTypesToOffsets[arg], insertionPoint, F);
       }
       else{
