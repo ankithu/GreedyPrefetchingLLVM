@@ -13,6 +13,7 @@
 #include <optional>
 #include <iostream>
 #include <vector>
+#include <utility>
 
 using namespace llvm;
 
@@ -89,7 +90,7 @@ struct GreedyPrefetchPass : public PassInfoMixin<GreedyPrefetchPass> {
     * Returns a map from argument of function args to offsets of record pointer members
   ***/
  // TODO: check that structs are not opaque before peering into them
-  std::unordered_map<Value*, std::vector<size_t>> getRecursiveMemberOffsets(Function &F) {
+  std::unordered_map<Value*, std::vector<std::pair<Type*, size_t>>> getRecursiveMemberOffsets(Function &F) {
     /***
       * For each function arg typ
       *   if type dyncasts to struct ptr
@@ -99,7 +100,7 @@ struct GreedyPrefetchPass : public PassInfoMixin<GreedyPrefetchPass> {
     ***/
     Module* module = F.getParent();
     const DataLayout& DL = module->getDataLayout();
-    std::unordered_map<Value*, std::vector<size_t>> offsets;
+    std::unordered_map<Value*, std::vector<std::pair<Type*, size_t>>> offsets;
 
     auto arglist = F.args();
 
@@ -112,7 +113,7 @@ struct GreedyPrefetchPass : public PassInfoMixin<GreedyPrefetchPass> {
             if (auto* fieldPtr = dyn_cast<PointerType>(fieldType)) {
               if (auto* fieldInnerType = dyn_cast<StructType>(fieldPtr->getElementType())) {
                 uint64_t offset = DL.getStructLayout(innerType)->getElementOffset(i);
-                offsets[a].push_back(offset);
+                offsets[a].push_back({fieldType, offset});
 
                 std::string type_str;
                 llvm::raw_string_ostream rso(type_str);
@@ -240,7 +241,7 @@ struct GreedyPrefetchPass : public PassInfoMixin<GreedyPrefetchPass> {
 
   PreservedAnalyses run(Function &F, FunctionAnalysisManager &FAM) {
     std::unordered_map<Value*, std::vector<CallInst*>> argsToCalls = getArgumentsToCallsThatNeedIt(F);
-    std::unordered_map<Value*, std::vector<size_t>> RDSTypesToOffsets = getRecursiveMemberOffsets(F);
+    std::unordered_map<Value*, std::vector<std::pair<Type*, size_t>>> RDSTypesToOffsets = getRecursiveMemberOffsets(F);
     std::unordered_map<BasicBlock*, size_t> order = getStaticOrdering(F);
 
     for (auto& [arg, calls] : argsToCalls) {
