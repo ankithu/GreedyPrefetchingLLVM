@@ -9,6 +9,8 @@
 #include <llvm/IR/Intrinsics.h>
 #include <llvm/IR/Instructions.h>
 #include "llvm/IR/CFG.h"
+#include <unordered_map>
+#include "llvm/IR/Value.h"
 
 #include <queue>
 #include <string>
@@ -100,30 +102,19 @@ struct GreedyPrefetchPass : public PassInfoMixin<GreedyPrefetchPass> {
       *       if member type dyncasts to struct ptr
       *         add offset to result vector
     ***/
-    Module* module = F.getParent();
-    const DataLayout& DL = module->getDataLayout();
     std::unordered_map<Value*, std::vector<size_t>> offsets;
 
     auto arglist = F.args();
 
     for (auto* a = arglist.begin(); a != arglist.end(); ++a){
       if (auto* ptr = dyn_cast<PointerType>(a->getType())) {
-        if (auto* innerType = dyn_cast<StructType>(ptr->getElementType())) {
+        if (auto* innerType = dyn_cast<StructType>(ptr->getPointerElementType())) {
           for (size_t i = 0; i < innerType->getNumElements(); ++i) {
-            auto* fieldType = innerType->getTypeAtIndex(i);
-
-            if (auto* fieldPtr = dyn_cast<PointerType>(fieldType)) {
-              if (auto* fieldInnerType = dyn_cast<StructType>(fieldPtr->getElementType())) {
-                uint64_t offset = DL.getStructLayout(innerType)->getElementOffset(i);
-                offsets[a].push_back(offset);
-
-                std::string type_str;
-                llvm::raw_string_ostream rso(type_str);
-                fieldInnerType->print(rso);
-                llvm::errs() << "Type Info: " << rso.str() << " " << offset << " " << "\n";
+            if (auto* fieldPtr = dyn_cast<PointerType>(innerType->getTypeAtIndex(i))) {
+              if (auto* fieldInnerType = dyn_cast<StructType>(fieldPtr->getPointerElementType())) {
+                offsets[a].push_back(i);
               }
             }
-
           }
         }
       }
@@ -156,59 +147,38 @@ struct GreedyPrefetchPass : public PassInfoMixin<GreedyPrefetchPass> {
 
 
     auto eltT = arg->getType()->getPointerElementType();
-    Function* prefetchFunc = Intrinsic::getDeclaration(F.getParent(), Intrinsic::prefetch, eltT);
+    Function* prefetchFunc = Intrinsic::getDeclaration(F.getParent(), Intrinsic::prefetch, arg->getType());
 
     size_t origBBSize = countInstructions(*insertionBB);
+    Value* zero = ConstantInt::get(Type::getInt32Ty(context), 0);
     for (size_t offset : offsets) {
         // Compute address of struct element using byte offset
         Value* offsetValue = ConstantInt::get(Type::getInt32Ty(context), offset);
-        // Create a new GEP instruction (dangling, not yet attached to a basic block)
-        Instruction* elementAddr = GetElementPtrInst::Create(
-                                  eltT, // The element type
-                                  arg, // The base pointer
-                                  {offsetValue}, // The index list
-                                  "",
-                                  insertionBB->getTerminator()
-                            );
-        //Value* elementAddr = builder.CreateGEP(eltT, arg, {offsetValue}, "");
+        Value *indices[2] = {zero, offsetValue};
+        auto indexes =  ArrayRef<Value*>(indices, 2);
+        errs() << " offset: " << offset << " \n";
+        Value* elementAddr = builder.CreateInBoundsGEP(eltT, arg, indexes, "");
+        Value* loadPtr = builder.CreateLoad(arg->getType(), elementAddr, "");
+        if (elementAddr->getType()->isPointerTy()){
+          errs() << "is pointer type: " << *elementAddr->getType() << "\n";
+        }
+        else{
+          errs() << "is not pointer type \n";
+        }
        // builder.CreateGEP(loadedArg->getType()->getPointerElementType(), loadedArg, offsetValue);
 
         // Prefetch address
         // 0 = read, 3 = high locality, 1 = data cache
         std::vector<Value*> args = {
-            elementAddr,
+            loadPtr,
             ConstantInt::get(Type::getInt32Ty(context), 0), // rw = 0 (read)
             ConstantInt::get(Type::getInt32Ty(context), 3), // locality
             ConstantInt::get(Type::getInt32Ty(context), 1)  // cache type (data cache)
         };
 
-        // Create a new CallInst (dangling, not yet attached to a basic block)
-        CallInst* prefetchInst = CallInst::Create(prefetchFunc->getFunctionType(), prefetchFunc, args, "");
-        prefetchInst->insertBefore(insertionBB->getTerminator());
-        //Value* call = builder.CreateCall(prefetchFunc->getFunctionType(), prefetchFunc, args, "");
+        builder.CreateCall(prefetchFunc->getFunctionType(), prefetchFunc, args, "");
     }
     errs() << origBBSize << " \n";
-    // for (size_t i = 0; i < offsets.size(); ++i){
-    //   // Get the terminator instruction
-    //   Instruction *terminator = insertionBB->getTerminator();
-
-    //   // Get the instruction before the terminator
-    //   Instruction *instrToMove = terminator->getPrevNode();
-
-    //   // Remove from its current position
-    //   instrToMove->removeFromParent();
-
-    //   // Insert at the beginning of the basic block
-    //   insertionBB->getInstList().insert(insertionBB->getFirstInsertionPt(), instrToMove);
-    // }
-    // for (size_t i = 0; i < origBBSize; ++i){
-    //   Instruction* firstInst = &*insertionBB->begin();
-    //   Instruction* terminatorInst = insertionBB->getTerminator();
-    //   errs() << "f:" << firstInst << " \n" << "l: " << terminatorInst << " \n";
-    //   if (firstInst != terminatorInst) {
-    //     firstInst->moveBefore(terminatorInst);
-    //   }
-    // }
   }
   
   /***
