@@ -21,29 +21,33 @@ clang ${1}.bc -o ${1}.exe
 # ./${1}.exe > correct_output TODO: UPDATE EXAMPLES FOR OUTPUT REASONS
 
 opt -load-pass-plugin="./build/greedyPrefetchingPass/GreedyPrefetch.so" -passes="greedy-prefetch" ${1}.bc -o ${1}_greedy.bc
-
 clang ${1}_greedy.bc -o ${1}_greedy.exe
 
 # get ll files for debugging
-llvm-dis ${1}.bc -o ${1}_greedy.ll
+llvm-dis ${1}.bc -o ${1}.ll
 llvm-dis ${1}_greedy.bc -o ${1}_greedy.ll
 
-# ./${1}_greedy > greedy_output TODO: UPDATE EXAMPLES FOR OUTPUT REASONS
+./${1}_greedy.exe > greedy_output
+./${1}.exe > regular_output
 
 
-# echo -e "\n=== Program Correctness Validation ==="
-# if [ "$(diff correct_output greedy_output)" != "" ]; then
-#     echo -e ">> Outputs do not match\n"
-# else
-#     echo -e ">> Outputs match\n"
-#     # Measure performance
-#     echo -e "1. Performance of unoptimized code"
-#     time ./${1} > /dev/null
-#     echo -e "\n\n"
-#     echo -e "2. Performance of optimized code"
-#     time ./${1}_greedy > /dev/null
-#     echo -e "\n\n"
-# fi
+echo -e "\n=== Program Correctness Validation ==="
+if [ "$(diff correct_output greedy_output)" != "" ]; then
+    echo -e ">> Outputs do not match\n"
+ else
+    echo -e ">> Outputs match\n"
+fi
+
+rm greedy_output
+rm regular_output
+
+# Measure performance
+echo -e "1. Performance of unoptimized code"
+time ./${1}.exe > /dev/null
+echo -e "\n\n"
+echo -e "2. Performance of optimized code"
+time ./${1}_greedy.exe > /dev/null
+echo -e "\n\n"
 
 # Old example
 # opt -load-pass-plugin=./build/greedyPrefetchingPass/GreedyPrefetch.so -S -passes="greedy-prefetch" $1.ll -o ${1}.prof.bc
