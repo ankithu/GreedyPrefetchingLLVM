@@ -4,3 +4,4 @@ build/*
 *_output
 *.ll
 *.exe
+*.s
