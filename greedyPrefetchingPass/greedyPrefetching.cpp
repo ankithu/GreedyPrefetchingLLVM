@@ -90,11 +90,17 @@ struct GreedyPrefetchPass : public PassInfoMixin<GreedyPrefetchPass> {
     return res;
   }
 
+  //generate one of these structs for every element we want to prefetch
+  struct PrefetchInfo {
+    std::vector<size_t>  gepOffsets;
+    PointerType* structPointerType; //pointer to the struct that we are prefetching
+  };
+
   /***
     * Returns a map from argument of function args to offsets of record pointer members
   ***/
  // TODO: check that structs are not opaque before peering into them
-  std::unordered_map<Value*, std::vector<std::pair<size_t, PointerType*>>> getRecursiveMemberOffsets(Function &F) {
+  std::unordered_map<Value*, std::vector<PrefetchInfo>> getPrefetchInfoForArguments(Function &F) {
     /***
       * For each function arg typ
       *   if type dyncasts to struct ptr
@@ -102,17 +108,32 @@ struct GreedyPrefetchPass : public PassInfoMixin<GreedyPrefetchPass> {
       *       if member type dyncasts to struct ptr
       *         add offset to result vector
     ***/
-    std::unordered_map<Value*, std::vector<std::pair<size_t, PointerType*>>> offsets;
+    std::unordered_map<Value*, std::vector<PrefetchInfo>> offsets;
 
     auto arglist = F.args();
-
+    
     for (auto* a = arglist.begin(); a != arglist.end(); ++a){
       if (auto* ptr = dyn_cast<PointerType>(a->getType())) {
         if (auto* innerType = dyn_cast<StructType>(ptr->getPointerElementType())) {
+          //innerType is the if we have T* a as an arg then inner type is T
           for (size_t i = 0; i < innerType->getNumElements(); ++i) {
-            if (auto* fieldPtr = dyn_cast<PointerType>(innerType->getTypeAtIndex(i))) {
-              if (auto* fieldInnerType = dyn_cast<StructType>(fieldPtr->getPointerElementType())) {
-                offsets[a].push_back({i, fieldPtr});
+            //if T = {T0 a, T1 b, ..., TN z} then argumentFieldType is Ti
+            auto* argumentFieldType = innerType->getTypeAtIndex(i);
+            //case 1 we have a direct  pointer to a struct
+            if (auto* argumentFieldPtrType = dyn_cast<PointerType>(argumentFieldType)) {
+              if (auto* fieldInnerType = dyn_cast<StructType>(argumentFieldPtrType->getPointerElementType())) {
+                offsets[a].push_back({{i}, argumentFieldPtrType});
+              }
+            }
+            //case 2 we have an array of pointers to structs
+            if (auto* argumentFieldArayType = dyn_cast<ArrayType>(argumentFieldType)){
+              if (auto* argumentFieldArrayElementType = dyn_cast<PointerType>(argumentFieldArayType->getElementType())){
+                if (auto* argumentFieldArrayElementPointeeType = dyn_cast<StructType>(argumentFieldArrayElementType->getElementType())){
+                  //push a new PrefetchInfo for each element of the array
+                  for (size_t j = 0; j < argumentFieldArayType->getNumElements(); ++j){
+                    offsets[a].push_back({{i, j}, argumentFieldArrayElementType});
+                  }
+                }
               }
             }
           }
@@ -133,7 +154,7 @@ struct GreedyPrefetchPass : public PassInfoMixin<GreedyPrefetchPass> {
   /***
   * Generates prefetch instructions for given RDS (greedily prefetch entire RDS)
   */
-  void genAndInsertPrefetchInstructions(Value* arg, std::vector<std::pair<size_t, PointerType*>>& offsets, BasicBlock* insertionBB, Function& F) {
+  void genAndInsertPrefetchInstructions(Value* arg, std::vector<PrefetchInfo>& offsets, BasicBlock* insertionBB, Function& F) {
     /***
      * Steps:
      * 1. Load the argument (this is the address of arg now)
@@ -150,13 +171,15 @@ struct GreedyPrefetchPass : public PassInfoMixin<GreedyPrefetchPass> {
 
     size_t origBBSize = countInstructions(*insertionBB);
     Value* zero = ConstantInt::get(Type::getInt32Ty(context), 0);
-    for (auto& [offset, prefetchPointerType] : offsets) {
+    for (auto& [offsets, prefetchPointerType] : offsets) {
         Function* prefetchFunc = Intrinsic::getDeclaration(F.getParent(), Intrinsic::prefetch, prefetchPointerType);
         // Compute address of struct element using byte offset
-        Value* offsetValue = ConstantInt::get(Type::getInt32Ty(context), offset);
-        Value *indices[2] = {zero, offsetValue};
-        auto indexes =  ArrayRef<Value*>(indices, 2);
-        errs() << " offset: " << offset << " \n";
+        std::vector<Value*> offsetValues = {zero};
+        for (auto offset : offsets){
+          offsetValues.push_back(ConstantInt::get(Type::getInt32Ty(context), offset));
+        }
+        auto indexes =  ArrayRef<Value*>(offsetValues);
+        //errs() << " offsets: " << indexes << " \n";
         Value* elementAddr = builder.CreateInBoundsGEP(eltT, arg, indexes, "");
         Value* loadPtr = builder.CreateLoad(prefetchPointerType, elementAddr, "");
         if (elementAddr->getType()->isPointerTy()){
@@ -245,7 +268,7 @@ struct GreedyPrefetchPass : public PassInfoMixin<GreedyPrefetchPass> {
 
   PreservedAnalyses run(Function &F, FunctionAnalysisManager &FAM) {
     std::unordered_map<Value*, std::vector<CallInst*>> argsToCalls = getArgumentsToCallsThatNeedIt(F);
-    std::unordered_map<Value*, std::vector<std::pair<size_t, PointerType*>>> RDSTypesToOffsets = getRecursiveMemberOffsets(F);
+    std::unordered_map<Value*, std::vector<PrefetchInfo>> RDSTypesToOffsets = getPrefetchInfoForArguments(F);
 
     for (auto& [arg, calls] : argsToCalls) {
       if (RDSTypesToOffsets.find(arg) == RDSTypesToOffsets.end()){
