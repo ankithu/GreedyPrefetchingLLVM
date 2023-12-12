@@ -92,11 +92,17 @@ struct GreedyPrefetchPass : public PassInfoMixin<GreedyPrefetchPass> {
     return res;
   }
 
+  //generate one of these structs for every element we want to prefetch
+  struct PrefetchInfo {
+    std::vector<size_t>  gepOffsets;
+    PointerType* structPointerType; //pointer to the struct that we are prefetching
+  };
+
   /***
     * Returns a map from argument of function args to offsets of record pointer members
   ***/
  // TODO: check that structs are not opaque before peering into them
-  std::unordered_map<Value*, std::vector<std::pair<size_t, PointerType*>>> getRecursiveMemberOffsets(Function &F) {
+  std::unordered_map<Value*, std::vector<PrefetchInfo>> getPrefetchInfoForArguments(Function &F) {
     /***
       * For each function arg typ
       *   if type dyncasts to struct ptr
@@ -104,17 +110,32 @@ struct GreedyPrefetchPass : public PassInfoMixin<GreedyPrefetchPass> {
       *       if member type dyncasts to struct ptr
       *         add offset to result vector
     ***/
-    std::unordered_map<Value*, std::vector<std::pair<size_t, PointerType*>>> offsets;
+    std::unordered_map<Value*, std::vector<PrefetchInfo>> offsets;
 
     auto arglist = F.args();
-
+    
     for (auto* a = arglist.begin(); a != arglist.end(); ++a){
       if (auto* ptr = dyn_cast<PointerType>(a->getType())) {
         if (auto* innerType = dyn_cast<StructType>(ptr->getPointerElementType())) {
+          //innerType is the if we have T* a as an arg then inner type is T
           for (size_t i = 0; i < innerType->getNumElements(); ++i) {
-            if (auto* fieldPtr = dyn_cast<PointerType>(innerType->getTypeAtIndex(i))) {
-              if (auto* fieldInnerType = dyn_cast<StructType>(fieldPtr->getPointerElementType())) {
-                offsets[a].push_back({i, fieldPtr});
+            //if T = {T0 a, T1 b, ..., TN z} then argumentFieldType is Ti
+            auto* argumentFieldType = innerType->getTypeAtIndex(i);
+            //case 1 we have a direct  pointer to a struct
+            if (auto* argumentFieldPtrType = dyn_cast<PointerType>(argumentFieldType)) {
+              if (auto* fieldInnerType = dyn_cast<StructType>(argumentFieldPtrType->getPointerElementType())) {
+                offsets[a].push_back({{i}, argumentFieldPtrType});
+              }
+            }
+            //case 2 we have an array of pointers to structs
+            if (auto* argumentFieldArayType = dyn_cast<ArrayType>(argumentFieldType)){
+              if (auto* argumentFieldArrayElementType = dyn_cast<PointerType>(argumentFieldArayType->getElementType())){
+                if (auto* argumentFieldArrayElementPointeeType = dyn_cast<StructType>(argumentFieldArrayElementType->getElementType())){
+                  //push a new PrefetchInfo for each element of the array
+                  for (size_t j = 0; j < argumentFieldArayType->getNumElements(); ++j){
+                    offsets[a].push_back({{i, j}, argumentFieldArrayElementType});
+                  }
+                }
               }
             }
           }
@@ -135,7 +156,7 @@ struct GreedyPrefetchPass : public PassInfoMixin<GreedyPrefetchPass> {
   /***
   * Generates prefetch instructions for given RDS (greedily prefetch entire RDS)
   */
-  void genAndInsertPrefetchInstructions(Value* arg, std::vector<std::pair<size_t, PointerType*>>& offsets, BasicBlock* insertionBB, Function& F) {
+  void genAndInsertPrefetchInstructions(Value* arg, std::vector<PrefetchInfo>& offsets, Function& F) {
     /***
      * Steps:
      * 1. Load the argument (this is the address of arg now)
@@ -145,28 +166,34 @@ struct GreedyPrefetchPass : public PassInfoMixin<GreedyPrefetchPass> {
      * Total instructions 1 + 2 * (num_offsets)
     */
     LLVMContext& context = F.getContext();
-    IRBuilder<> builder(insertionBB, insertionBB->begin());
+    Value* nullValue = ConstantPointerNull::get(cast<PointerType>(arg->getType()));
 
+    // Create the comparison instruction
+   
+    BasicBlock* originalFirstBlock = &F.getEntryBlock();
+    BasicBlock* entry = BasicBlock::Create(context, "check-arg", &F, originalFirstBlock);
+    IRBuilder<> builder(context);
+    builder.SetInsertPoint(entry);
+    Value* isNonNull = builder.CreateICmpNE(arg, nullValue, "isNonNull");
+    BasicBlock *conditionalBlock = BasicBlock::Create(context, "conditional", &F, originalFirstBlock);
+    builder.CreateCondBr(isNonNull, conditionalBlock, originalFirstBlock);
+    builder.SetInsertPoint(conditionalBlock);
 
     auto eltT = arg->getType()->getPointerElementType();
 
-    size_t origBBSize = countInstructions(*insertionBB);
     Value* zero = ConstantInt::get(Type::getInt32Ty(context), 0);
-    for (auto& [offset, prefetchPointerType] : offsets) {
+    for (auto& [offsets, prefetchPointerType] : offsets) {
         Function* prefetchFunc = Intrinsic::getDeclaration(F.getParent(), Intrinsic::prefetch, prefetchPointerType);
         // Compute address of struct element using byte offset
-        Value* offsetValue = ConstantInt::get(Type::getInt32Ty(context), offset);
-        Value *indices[2] = {zero, offsetValue};
-        auto indexes =  ArrayRef<Value*>(indices, 2);
-        errs() << " offset: " << offset << " \n";
+        std::vector<Value*> offsetValues = {zero};
+        for (auto offset : offsets){
+          offsetValues.push_back(ConstantInt::get(Type::getInt32Ty(context), offset));
+        }
+        auto indexes =  ArrayRef<Value*>(offsetValues);
+        //errs() << " offsets: " << indexes << " \n";
         Value* elementAddr = builder.CreateInBoundsGEP(eltT, arg, indexes, "");
         Value* loadPtr = builder.CreateLoad(prefetchPointerType, elementAddr, "");
-        if (elementAddr->getType()->isPointerTy()){
-          errs() << "is pointer type: " << *elementAddr->getType() << "\n";
-        }
-        else{
-          errs() << "is not pointer type \n";
-        }
+
        // builder.CreateGEP(loadedArg->getType()->getPointerElementType(), loadedArg, offsetValue);
 
         // Prefetch address
@@ -180,7 +207,8 @@ struct GreedyPrefetchPass : public PassInfoMixin<GreedyPrefetchPass> {
 
         builder.CreateCall(prefetchFunc->getFunctionType(), prefetchFunc, args, "");
     }
-    errs() << origBBSize << " \n";
+    builder.CreateBr(originalFirstBlock);
+    originalFirstBlock->moveAfter(conditionalBlock);
   }
   
   /***
@@ -206,43 +234,43 @@ struct GreedyPrefetchPass : public PassInfoMixin<GreedyPrefetchPass> {
     return output;
   }
 
-  BasicBlock* findFirstBlockThatNecessitatesExecutionOfOneOf(std::vector<CallInst*> targetInstructions, Function& F) {
-    PostDominatorTree PDT;
-    PDT.recalculate(F);
+//   BasicBlock* findFirstBlockThatNecessitatesExecutionOfOneOf(std::vector<CallInst*> targetInstructions, Function& F) {
+//     PostDominatorTree PDT;
+//     PDT.recalculate(F);
 
-    std::vector<BasicBlock*> targetBlocks;
-    for (auto* tIns : targetInstructions){
-      targetBlocks.push_back(tIns->getParent());
-    }
+//     std::vector<BasicBlock*> targetBlocks;
+//     for (auto* tIns : targetInstructions){
+//       targetBlocks.push_back(tIns->getParent());
+//     }
     
-    std::queue<BasicBlock*> blockQueue;
-    std::set<BasicBlock*> visited;
+//     std::queue<BasicBlock*> blockQueue;
+//     std::set<BasicBlock*> visited;
 
-    blockQueue.push(&F.getEntryBlock());
-    visited.insert(&F.getEntryBlock());
+//     blockQueue.push(&F.getEntryBlock());
+//     visited.insert(&F.getEntryBlock());
 
-    while (!blockQueue.empty()) {
-        BasicBlock *currentBlock = blockQueue.front();
-        blockQueue.pop();
+//     while (!blockQueue.empty()) {
+//         BasicBlock *currentBlock = blockQueue.front();
+//         blockQueue.pop();
 
-        for (auto* targetBlock : targetBlocks){
+//         for (auto* targetBlock : targetBlocks){
 
-          if (currentBlock == targetBlock || PDT.dominates(targetBlock, currentBlock)){
-            return currentBlock;
-          }
-        }
+//           if (currentBlock == targetBlock || PDT.dominates(targetBlock, currentBlock)){
+//             return currentBlock;
+//           }
+//         }
         
 
-        for (BasicBlock *successor : successors(currentBlock)) {
-          if (visited.find(successor) == visited.end()) {
-            blockQueue.push(successor);
-            visited.insert(successor);
-          }
-        }
-    }
+//         for (BasicBlock *successor : successors(currentBlock)) {
+//           if (visited.find(successor) == visited.end()) {
+//             blockQueue.push(successor);
+//             visited.insert(successor);
+//           }
+//         }
+//     }
 
-    return nullptr;
-}
+//     return nullptr;
+// }
 
   void populateCallGraph(Module &M, CallGraph &CG) {
     for (Function& F : M.functions()) {
@@ -260,7 +288,7 @@ struct GreedyPrefetchPass : public PassInfoMixin<GreedyPrefetchPass> {
 
   PreservedAnalyses run(Function &F, FunctionAnalysisManager &FAM) {
     std::unordered_map<Value*, std::vector<CallInst*>> argsToCalls = getArgumentsToCallsThatNeedIt(F);
-    std::unordered_map<Value*, std::vector<std::pair<size_t, PointerType*>>> RDSTypesToOffsets = getRecursiveMemberOffsets(F);
+    std::unordered_map<Value*, std::vector<PrefetchInfo>> RDSTypesToOffsets = getPrefetchInfoForArguments(F);
 
     Module* M = F.getParent();
     llvm::CallGraph CG(*M);
@@ -270,14 +298,14 @@ struct GreedyPrefetchPass : public PassInfoMixin<GreedyPrefetchPass> {
       if (RDSTypesToOffsets.find(arg) == RDSTypesToOffsets.end()){
         continue;
       }
-      BasicBlock* insertionPoint = findFirstBlockThatNecessitatesExecutionOfOneOf(calls, F);
-      if (insertionPoint) {
-        errs() << "insertionPoint is: " << *insertionPoint->begin() << "\n";
-        genAndInsertPrefetchInstructions(arg, RDSTypesToOffsets[arg], insertionPoint, F);
-      }
-      else{
+      //BasicBlock* insertionPoint = findFirstBlockThatNecessitatesExecutionOfOneOf(calls, F);
+      //if (insertionPoint) {
+        //errs() << "insertionPoint is: " << *insertionPoint->begin() << "\n";
+        genAndInsertPrefetchInstructions(arg, RDSTypesToOffsets[arg], F);
+      //}
+      //else{
         errs() << "no insertion point calculated. This is probably wrong! \n";
-      }
+      //}
     }
 
     for (auto& bb : F){
