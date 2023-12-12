@@ -1,4 +1,5 @@
 #include "llvm/Analysis/PostDominators.h"
+#include "llvm/Analysis/CallGraph.h"
 #include "llvm/IR/PassManager.h"
 #include "llvm/Passes/PassBuilder.h"
 #include "llvm/Passes/PassPlugin.h"
@@ -9,7 +10,6 @@
 #include <llvm/IR/Intrinsics.h>
 #include <llvm/IR/Instructions.h>
 #include "llvm/IR/CFG.h"
-#include <unordered_map>
 #include "llvm/IR/Value.h"
 
 #include <queue>
@@ -18,14 +18,16 @@
 #include <iostream>
 #include <vector>
 #include <set>
+#include <unordered_map>
+
 
 using namespace llvm;
 
 
 namespace {
 
-struct GreedyPrefetchPass : public PassInfoMixin<GreedyPrefetchPass> {
-  
+struct GreedyPrefetchPass : public PassInfoMixin<GreedyPrefetchPass> {  
+
   /**
    * if a recursive call derives from an argument, this will return true
   */
@@ -242,10 +244,27 @@ struct GreedyPrefetchPass : public PassInfoMixin<GreedyPrefetchPass> {
     return nullptr;
 }
 
+  void populateCallGraph(Module &M, CallGraph &CG) {
+    for (Function& F : M.functions()) {
+      llvm::CallGraphNode *cgNode = CG[&F];
+      for (inst_iterator I = inst_begin(F), E = inst_end(F); I != E; ++I) {
+        if (auto *callInst = dyn_cast<CallInst>(&*I)) {
+          if (auto* calledFunction = callInst->getCalledFunction()) {
+            cgNode->addCalledFunction(callInst, CG[calledFunction]);
+            errs() << F.getName() << " calls " << calledFunction->getName() << "\n";
+            }
+          }
+        }
+      }
+    }    
 
   PreservedAnalyses run(Function &F, FunctionAnalysisManager &FAM) {
     std::unordered_map<Value*, std::vector<CallInst*>> argsToCalls = getArgumentsToCallsThatNeedIt(F);
     std::unordered_map<Value*, std::vector<std::pair<size_t, PointerType*>>> RDSTypesToOffsets = getRecursiveMemberOffsets(F);
+
+    Module* M = F.getParent();
+    llvm::CallGraph CG(*M);
+    populateCallGraph(*M, CG);
 
     for (auto& [arg, calls] : argsToCalls) {
       if (RDSTypesToOffsets.find(arg) == RDSTypesToOffsets.end()){
