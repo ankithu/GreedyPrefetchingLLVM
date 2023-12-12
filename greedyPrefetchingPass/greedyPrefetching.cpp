@@ -154,7 +154,7 @@ struct GreedyPrefetchPass : public PassInfoMixin<GreedyPrefetchPass> {
   /***
   * Generates prefetch instructions for given RDS (greedily prefetch entire RDS)
   */
-  void genAndInsertPrefetchInstructions(Value* arg, std::vector<PrefetchInfo>& offsets, BasicBlock* insertionBB, Function& F) {
+  void genAndInsertPrefetchInstructions(Value* arg, std::vector<PrefetchInfo>& offsets, Function& F) {
     /***
      * Steps:
      * 1. Load the argument (this is the address of arg now)
@@ -232,43 +232,43 @@ struct GreedyPrefetchPass : public PassInfoMixin<GreedyPrefetchPass> {
     return output;
   }
 
-  BasicBlock* findFirstBlockThatNecessitatesExecutionOfOneOf(std::vector<CallInst*> targetInstructions, Function& F) {
-    PostDominatorTree PDT;
-    PDT.recalculate(F);
+//   BasicBlock* findFirstBlockThatNecessitatesExecutionOfOneOf(std::vector<CallInst*> targetInstructions, Function& F) {
+//     PostDominatorTree PDT;
+//     PDT.recalculate(F);
 
-    std::vector<BasicBlock*> targetBlocks;
-    for (auto* tIns : targetInstructions){
-      targetBlocks.push_back(tIns->getParent());
-    }
+//     std::vector<BasicBlock*> targetBlocks;
+//     for (auto* tIns : targetInstructions){
+//       targetBlocks.push_back(tIns->getParent());
+//     }
     
-    std::queue<BasicBlock*> blockQueue;
-    std::set<BasicBlock*> visited;
+//     std::queue<BasicBlock*> blockQueue;
+//     std::set<BasicBlock*> visited;
 
-    blockQueue.push(&F.getEntryBlock());
-    visited.insert(&F.getEntryBlock());
+//     blockQueue.push(&F.getEntryBlock());
+//     visited.insert(&F.getEntryBlock());
 
-    while (!blockQueue.empty()) {
-        BasicBlock *currentBlock = blockQueue.front();
-        blockQueue.pop();
+//     while (!blockQueue.empty()) {
+//         BasicBlock *currentBlock = blockQueue.front();
+//         blockQueue.pop();
 
-        for (auto* targetBlock : targetBlocks){
+//         for (auto* targetBlock : targetBlocks){
 
-          if (currentBlock == targetBlock || PDT.dominates(targetBlock, currentBlock)){
-            return currentBlock;
-          }
-        }
+//           if (currentBlock == targetBlock || PDT.dominates(targetBlock, currentBlock)){
+//             return currentBlock;
+//           }
+//         }
         
 
-        for (BasicBlock *successor : successors(currentBlock)) {
-          if (visited.find(successor) == visited.end()) {
-            blockQueue.push(successor);
-            visited.insert(successor);
-          }
-        }
-    }
+//         for (BasicBlock *successor : successors(currentBlock)) {
+//           if (visited.find(successor) == visited.end()) {
+//             blockQueue.push(successor);
+//             visited.insert(successor);
+//           }
+//         }
+//     }
 
-    return nullptr;
-}
+//     return nullptr;
+// }
 
 
   PreservedAnalyses run(Function &F, FunctionAnalysisManager &FAM) {
@@ -279,14 +279,14 @@ struct GreedyPrefetchPass : public PassInfoMixin<GreedyPrefetchPass> {
       if (RDSTypesToOffsets.find(arg) == RDSTypesToOffsets.end()){
         continue;
       }
-      BasicBlock* insertionPoint = findFirstBlockThatNecessitatesExecutionOfOneOf(calls, F);
-      if (insertionPoint) {
+      //BasicBlock* insertionPoint = findFirstBlockThatNecessitatesExecutionOfOneOf(calls, F);
+      //if (insertionPoint) {
         //errs() << "insertionPoint is: " << *insertionPoint->begin() << "\n";
-        genAndInsertPrefetchInstructions(arg, RDSTypesToOffsets[arg], insertionPoint, F);
-      }
-      else{
+        genAndInsertPrefetchInstructions(arg, RDSTypesToOffsets[arg], F);
+      //}
+      //else{
         errs() << "no insertion point calculated. This is probably wrong! \n";
-      }
+      //}
     }
 
     for (auto& bb : F){
