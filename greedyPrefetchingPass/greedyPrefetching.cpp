@@ -164,12 +164,21 @@ struct GreedyPrefetchPass : public PassInfoMixin<GreedyPrefetchPass> {
      * Total instructions 1 + 2 * (num_offsets)
     */
     LLVMContext& context = F.getContext();
-    IRBuilder<> builder(insertionBB, insertionBB->begin());
+    Value* nullValue = ConstantPointerNull::get(cast<PointerType>(arg->getType()));
 
+    // Create the comparison instruction
+   
+    BasicBlock* originalFirstBlock = &F.getEntryBlock();
+    BasicBlock* entry = BasicBlock::Create(context, "check-arg", &F, originalFirstBlock);
+    IRBuilder<> builder(context);
+    builder.SetInsertPoint(entry);
+    Value* isNonNull = builder.CreateICmpNE(arg, nullValue, "isNonNull");
+    BasicBlock *conditionalBlock = BasicBlock::Create(context, "conditional", &F, originalFirstBlock);
+    builder.CreateCondBr(isNonNull, conditionalBlock, originalFirstBlock);
+    builder.SetInsertPoint(conditionalBlock);
 
     auto eltT = arg->getType()->getPointerElementType();
 
-    size_t origBBSize = countInstructions(*insertionBB);
     Value* zero = ConstantInt::get(Type::getInt32Ty(context), 0);
     for (auto& [offsets, prefetchPointerType] : offsets) {
         Function* prefetchFunc = Intrinsic::getDeclaration(F.getParent(), Intrinsic::prefetch, prefetchPointerType);
@@ -182,12 +191,7 @@ struct GreedyPrefetchPass : public PassInfoMixin<GreedyPrefetchPass> {
         //errs() << " offsets: " << indexes << " \n";
         Value* elementAddr = builder.CreateInBoundsGEP(eltT, arg, indexes, "");
         Value* loadPtr = builder.CreateLoad(prefetchPointerType, elementAddr, "");
-        if (elementAddr->getType()->isPointerTy()){
-          errs() << "is pointer type: " << *elementAddr->getType() << "\n";
-        }
-        else{
-          errs() << "is not pointer type \n";
-        }
+
        // builder.CreateGEP(loadedArg->getType()->getPointerElementType(), loadedArg, offsetValue);
 
         // Prefetch address
@@ -201,7 +205,8 @@ struct GreedyPrefetchPass : public PassInfoMixin<GreedyPrefetchPass> {
 
         builder.CreateCall(prefetchFunc->getFunctionType(), prefetchFunc, args, "");
     }
-    errs() << origBBSize << " \n";
+    builder.CreateBr(originalFirstBlock);
+    originalFirstBlock->moveAfter(conditionalBlock);
   }
   
   /***
@@ -276,7 +281,7 @@ struct GreedyPrefetchPass : public PassInfoMixin<GreedyPrefetchPass> {
       }
       BasicBlock* insertionPoint = findFirstBlockThatNecessitatesExecutionOfOneOf(calls, F);
       if (insertionPoint) {
-        errs() << "insertionPoint is: " << *insertionPoint->begin() << "\n";
+        //errs() << "insertionPoint is: " << *insertionPoint->begin() << "\n";
         genAndInsertPrefetchInstructions(arg, RDSTypesToOffsets[arg], insertionPoint, F);
       }
       else{
