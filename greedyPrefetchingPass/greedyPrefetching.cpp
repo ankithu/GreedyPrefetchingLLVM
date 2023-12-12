@@ -92,6 +92,41 @@ struct GreedyPrefetchPass : public PassInfoMixin<GreedyPrefetchPass> {
     return res;
   }
 
+  /****
+   * Returns a vector of call instructions within a given function that are chain recursive
+  */
+  std::vector<CallInst*> getChainRecursiveCalls(Function& F, CallGraph* CG) {
+    std::vector<CallInst*> res;
+    for (auto& bb: F){
+      for (auto& instr: bb){
+        if (auto* callInst = dyn_cast<CallInst>(&instr)) {
+          if (auto* calledFunction = callInst->getCalledFunction()) {
+            // Instead of checking if the function calls itself, we check if the two functions call each other
+            if (calleeCallsCaller(F, *calledFunction, CG)){
+              res.push_back(callInst);
+            }
+          }
+        }
+      }
+    }
+    return res;
+  }
+
+  /***
+   * For now this just checks if two functions directly call each other
+   * Since caller calls callee, it suffices to check if callee calls caller
+  ***/
+  bool calleeCallsCaller(Function& caller, Function& callee, CallGraph* CG) {
+    CallGraphNode* calleeNode = (*CG)[&callee];
+    for(auto callRecord = calleeNode->begin(); callRecord != calleeNode->end(); ++callRecord) {
+      CallGraphNode* candidateNode = callRecord->second;
+      if(candidateNode->getFunction() == &caller) {
+        return true;
+      }
+    }
+    return false;
+  }
+
   //generate one of these structs for every element we want to prefetch
   struct PrefetchInfo {
     std::vector<size_t>  gepOffsets;
@@ -214,10 +249,10 @@ struct GreedyPrefetchPass : public PassInfoMixin<GreedyPrefetchPass> {
   /***
    * Returns map from call to vector of Arguments that it relies on
   */
-  std::unordered_map<Value*, std::vector<CallInst*>> getArgumentsToCallsThatNeedIt(Function &F){
+  std::unordered_map<Value*, std::vector<CallInst*>> getArgumentsToCallsThatNeedIt(Function &F, CallGraph* CG = nullptr) {
     std::unordered_map<Value*, std::vector<CallInst*>> output;
     auto arglist = F.args();
-    std::vector<CallInst*> recursiveCalls = getRecursiveCalls(F);
+    std::vector<CallInst*> recursiveCalls = (CG != nullptr) ? getChainRecursiveCalls(F, CG) : getRecursiveCalls(F);
 
     //the function isn't recursive so its not a candidate for this optimization.
     if (recursiveCalls.empty()){
@@ -287,15 +322,17 @@ struct GreedyPrefetchPass : public PassInfoMixin<GreedyPrefetchPass> {
     }    
 
   PreservedAnalyses run(Function &F, FunctionAnalysisManager &FAM) {
-    std::unordered_map<Value*, std::vector<CallInst*>> argsToCalls = getArgumentsToCallsThatNeedIt(F);
-    std::unordered_map<Value*, std::vector<PrefetchInfo>> RDSTypesToOffsets = getPrefetchInfoForArguments(F);
-
     Module* M = F.getParent();
     llvm::CallGraph CG(*M);
     populateCallGraph(*M, CG);
 
+    std::unordered_map<Value*, std::vector<CallInst*>> argsToCalls = getArgumentsToCallsThatNeedIt(F, &CG);
+    std::unordered_map<Value*, std::vector<PrefetchInfo>> RDSTypesToOffsets = getPrefetchInfoForArguments(F);
+
+
+
     for (auto& [arg, calls] : argsToCalls) {
-      if (RDSTypesToOffsets.find(arg) == RDSTypesToOffsets.end()){
+      if (RDSTypesToOffsets.find(arg) == RDSTypesToOffsets.end()) {
         continue;
       }
       //BasicBlock* insertionPoint = findFirstBlockThatNecessitatesExecutionOfOneOf(calls, F);
