@@ -1,7 +1,9 @@
 build/*
+dot/*
 .vscode/*
 *.bc
-*_output
-*.ll
 *.exe
+*.ll
+*.pdf
 *.s
+*_output

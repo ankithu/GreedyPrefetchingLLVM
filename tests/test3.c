@@ -51,7 +51,7 @@ int main(void) {
     lowerTwo.first = NULL;
     lowerTwo.second = NULL;
 
-    // Direcotry Nodes
+    // Directory Nodes
     struct DirectoryNode first;
     first.someInfo = "dir1\0";
     first.directory = &lowerOne;
