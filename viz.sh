@@ -45,9 +45,9 @@ else
 fi
 
 var=0
-for i in $DOT_FILES
+for file in $DOT_FILES
 do
-   cat $i | dot -Tpdf > $OUTPUT_DIR/$BENCH-$var.$VIZ_TYPE.pdf
+   cat $file | dot -Tpdf > $OUTPUT_DIR/$BENCH-$var.$VIZ_TYPE.pdf
   ((var++))
 done
 # cat $DOT_FILES | dot -Tpdf > $OUTPUT_DIR/$BENCH.$VIZ_TYPE.pdf
