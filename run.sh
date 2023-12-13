@@ -19,7 +19,7 @@ llvm-dis ${1}.bc -o ${1}.ll
 llvm-dis ${1}_greedy.bc -o ${1}_greedy.ll
 
 ./${1}_greedy.exe > greedy_output
-./${1}.exe > regular_output
+./${1}.exe > correct_output
 
 
 echo -e "\n=== Program Correctness Validation ==="
@@ -30,7 +30,7 @@ if [ "$(diff correct_output greedy_output)" != "" ]; then
 fi
 
 rm greedy_output
-rm regular_output
+rm correct_output
 
 # Measure performance
 echo -e "1. Performance of unoptimized code"

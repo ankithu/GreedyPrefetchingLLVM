@@ -269,43 +269,6 @@ struct GreedyPrefetchPass : public PassInfoMixin<GreedyPrefetchPass> {
     return output;
   }
 
-//   BasicBlock* findFirstBlockThatNecessitatesExecutionOfOneOf(std::vector<CallInst*> targetInstructions, Function& F) {
-//     PostDominatorTree PDT;
-//     PDT.recalculate(F);
-
-//     std::vector<BasicBlock*> targetBlocks;
-//     for (auto* tIns : targetInstructions){
-//       targetBlocks.push_back(tIns->getParent());
-//     }
-    
-//     std::queue<BasicBlock*> blockQueue;
-//     std::set<BasicBlock*> visited;
-
-//     blockQueue.push(&F.getEntryBlock());
-//     visited.insert(&F.getEntryBlock());
-
-//     while (!blockQueue.empty()) {
-//         BasicBlock *currentBlock = blockQueue.front();
-//         blockQueue.pop();
-
-//         for (auto* targetBlock : targetBlocks){
-
-//           if (currentBlock == targetBlock || PDT.dominates(targetBlock, currentBlock)){
-//             return currentBlock;
-//           }
-//         }
-        
-
-//         for (BasicBlock *successor : successors(currentBlock)) {
-//           if (visited.find(successor) == visited.end()) {
-//             blockQueue.push(successor);
-//             visited.insert(successor);
-//           }
-//         }
-//     }
-
-//     return nullptr;
-// }
 
   void populateCallGraph(Module &M, CallGraph &CG) {
     for (Function& F : M.functions()) {
@@ -324,7 +287,7 @@ struct GreedyPrefetchPass : public PassInfoMixin<GreedyPrefetchPass> {
   PreservedAnalyses run(Function &F, FunctionAnalysisManager &FAM) {
     Module* M = F.getParent();
     llvm::CallGraph CG(*M);
-    populateCallGraph(*M, CG);
+    //populateCallGraph(*M, CG);
 
     std::unordered_map<Value*, std::vector<CallInst*>> argsToCalls = getArgumentsToCallsThatNeedIt(F, &CG);
     std::unordered_map<Value*, std::vector<PrefetchInfo>> RDSTypesToOffsets = getPrefetchInfoForArguments(F);
@@ -335,14 +298,8 @@ struct GreedyPrefetchPass : public PassInfoMixin<GreedyPrefetchPass> {
       if (RDSTypesToOffsets.find(arg) == RDSTypesToOffsets.end()) {
         continue;
       }
-      //BasicBlock* insertionPoint = findFirstBlockThatNecessitatesExecutionOfOneOf(calls, F);
-      //if (insertionPoint) {
-        //errs() << "insertionPoint is: " << *insertionPoint->begin() << "\n";
         genAndInsertPrefetchInstructions(arg, RDSTypesToOffsets[arg], F);
-      //}
-      //else{
-        errs() << "no insertion point calculated. This is probably wrong! \n";
-      //}
+
     }
 
     for (auto& bb : F){
