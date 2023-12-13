@@ -268,26 +268,11 @@ struct GreedyPrefetchPass : public PassInfoMixin<GreedyPrefetchPass> {
     }
     return output;
   }
-
-
-  void populateCallGraph(Module &M, CallGraph &CG) {
-    for (Function& F : M.functions()) {
-      llvm::CallGraphNode *cgNode = CG[&F];
-      for (inst_iterator I = inst_begin(F), E = inst_end(F); I != E; ++I) {
-        if (auto *callInst = dyn_cast<CallInst>(&*I)) {
-          if (auto* calledFunction = callInst->getCalledFunction()) {
-            cgNode->addCalledFunction(callInst, CG[calledFunction]);
-            errs() << F.getName() << " calls " << calledFunction->getName() << "\n";
-            }
-          }
-        }
-      }
-    }    
+  
 
   PreservedAnalyses run(Function &F, FunctionAnalysisManager &FAM) {
     Module* M = F.getParent();
     llvm::CallGraph CG(*M);
-    //populateCallGraph(*M, CG);
 
     std::unordered_map<Value*, std::vector<CallInst*>> argsToCalls = getArgumentsToCallsThatNeedIt(F, &CG);
     std::unordered_map<Value*, std::vector<PrefetchInfo>> RDSTypesToOffsets = getPrefetchInfoForArguments(F);
