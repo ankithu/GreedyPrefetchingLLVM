@@ -1,1 +1,1 @@
-rm -f default.profraw *_prof *_greedy *.bc *.profdata *_output *.ll *.exe *.s dot/*.pdf
+rm -rf default.profraw *_prof *_greedy *.bc *.profdata *_output *.ll *.exe *.s dot/*
